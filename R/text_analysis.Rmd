@@ -1,0 +1,25 @@
+---
+title: "r/Overwatch post text analysis"
+output: html_notebook
+---
+
+```{r setup}
+library(tidyverse)
+library(mongolite)
+
+source("./helper.R")
+
+posts <- mongo(db = "roverwatch", collection = "posts")
+example <- posts$iterate()$one()
+```
+
+# Collecting all post texts
+
+```{r}
+self_texts <- posts$find(fields = '{"id": 1, "selftext": 1, "title": 1}')
+```
+
+```{r}
+self_texts_clean <- clean_self_text(self_texts)
+```
+

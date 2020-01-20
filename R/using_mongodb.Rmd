@@ -1,0 +1,189 @@
+---
+title: "Accessing MongoDB roverwatch database"
+output: html_notebook
+---
+
+```{r}
+library(mongolite)
+library(tidyverse)
+library(lubridate)
+library(ggsignif)
+```
+
+```{r}
+posts <- mongo(db = "roverwatch", collection = "posts")
+```
+
+```{r}
+example <- posts$iterate()$one()
+```
+
+# Extracting number of subs overtime
+
+```{r}
+q1 = posts$find("{}", '{"created_utc": 1, "subreddit_subscribers": 1}')
+```
+
+```{r}
+n_subs <- q1 %>%
+  distinct(subreddit_subscribers, .keep_all = T) %>%
+  mutate(
+    created_utc = as_datetime(created_utc),
+    date = floor_date(as_datetime(created_utc), "day")
+  ) %>%
+  group_by(date) %>%
+  mutate(count_day = first(subreddit_subscribers)) %>%
+  select(-`_id`) %>%
+  distinct(count_day)
+  # arrange(created_utc)
+  
+```
+
+```{r}
+n_subs %>%
+  ggplot(aes(x = date, y = count_day)) +
+  geom_line()
+```
+
+<!-- # Extracting unique author names: -->
+
+<!-- ```{r} -->
+<!-- q2 = posts$distinct("author") -->
+<!-- ``` -->
+
+# What type of content do we like?
+
+First, let's find out the type of posts (i.e. highlights, discussion posts, etc) by extracting the info from the `link_flair_text`:
+
+```{r}
+q3 <- posts$find(fields = '{"link_flair_text":1, "score": 1, "num_comments":1, "_id": 0, "id":1}')
+```
+
+## Basic stats:
+
+```{r}
+summary(q3)
+```
+
+```{r}
+post_types_long <- q3 %>%
+  gather(var, value, -id, -link_flair_text)
+
+post_types_long %>%
+  ggplot(aes(value)) + 
+  facet_wrap( ~ var, scales = 'free') +
+  scale_x_continuous(limits = c(-5,20)) +
+  geom_histogram(bins = 10)
+  # coord_cartesian(xlim = c(0,20))
+```
+
+Posts with missing flair:
+
+```{r}
+sum(is.na(q3$link_flair_text))
+```
+
+```{r}
+post_types <- q3 %>%
+  mutate(link_flair_text = tolower(link_flair_text)) %>%
+  mutate(link_flair_text = gsub("&amp;", "and", link_flair_text)) %>%
+  separate(link_flair_text, into = c('flair1', 'flair2'), extra = "merge", sep = " \\| ") %>%
+  drop_na(flair1)
+
+post_types %>%
+  count(flair1, flair2, sort = T)
+```
+
+We can filter the `post_types` to contain only the approved post flairs:
+
+```{r}
+approved_flairs <- c(
+  "news and discussion",
+  "highlight",
+  "fan content",
+  "humor", 
+  "console", 
+  "esports",
+  "blizzard official"
+)
+
+approved_post_types <- post_types %>%
+  filter(flair1 %in% approved_flairs)
+```
+
+## Top scores per post type
+
+Firs't we need to get the post with the highest score from each category: 
+
+```{r top-score-per-type}
+top_posts_per_flair <- approved_post_types %>%
+  group_by(flair1) %>%
+  top_n(3, score)
+
+top_posts <- q3 %>%
+  top_n(10, score)
+```
+
+We can now retrieve the posts from our `post` collection: 
+
+```{r}
+query <- str_interp('{"id": {"$in": ${jsonlite::toJSON(top_posts$id)}}}')
+q4 <- posts$find(query, fields = '{"id": 1, "author": 1, "score": 1, "full_link": 1, "title":1}')
+```
+
+```{r}
+top_posts <- left_join(top_posts, q4)
+```
+
+## Distribution of scores per post type
+
+```{r}
+approved_post_types %>%
+  group_by(flair1) %>%
+  summarise(n)
+  # ggplot(aes(x = ))
+```
+
+## How do we consume posts with different flairs?
+
+We can try to understand how we are interacting with different types of posts by calculating the score to comment ratio of posts:
+
+```{r}
+c <- 1
+sc_ratios <- approved_post_types %>%
+  mutate(
+    sc_ratio = (score + c)/(num_comments + c),
+    log_sc_ratio = log2(sc_ratio)
+  )
+```
+ 
+```{r}
+sc_ratios %>%
+  ggplot(aes(fct_reorder(flair1, log_sc_ratio, .fun = median), log_sc_ratio)) +
+  geom_boxplot(notch = T) +
+  geom_signif(comparisons = list(c("highlight", "news and discussion"))) +
+  xlab("Post flair")+
+  ylab("Log Score/comment ratio") +
+  ggpubr::theme_pubclean()
+  
+```
+
+```{r}
+sc_ratios %>%
+  group_by(flair1) %>%
+  summarise(
+    mean = mean(log_sc_ratio),
+    median = median(log_sc_ratio)
+  ) %>%
+  arrange(median)
+```
+
+```{r}
+sc_ratios %>%
+  ggplot(aes(log_sc_ratio, color = flair1)) +
+  geom_freqpoly()+
+  ggpubr::theme_pubclean()+
+  xlab("Log Score/comment ratio")+
+  ylab("Count")
+```
+
